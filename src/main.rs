@@ -1,88 +1,77 @@
 use std::{
     collections::HashMap,
-    env::args,
-    fs::{File},
-    io::{BufRead, BufReader},
-    path::Path,
+    io::{stdin},
 };
 
-#[derive(PartialEq)]
-enum EntryMethod {
-    FileName,
-    MassEntry,
-}
-fn parse_card_line(line: String) -> Result<(u32, String), String> {
-    let numeric_cards = ["borrowing 100,000 arrows", "borrowing 100000 arrows",
-                         "guan-yu's 1,000-li march", "guan-yu's 1000-li march",
-                         "+2 mace", "5 alarm fire", "50 feet of rope",
-                         "celebr-8000", "d00-dl, caricaturist"];
-    for cardname in numeric_cards {
-        if line.contains(cardname) {
-            let (a, b) = line.split_once(cardname).unwrap();
-            let qty = if a.len() < b.len() { a } else { b };
-            let q = qty.trim().trim_matches('x').parse().unwrap_or(1);
-            return Ok((q, String::from(cardname)));
-        }
-    }
-    let split_point = line.find(|c: char| c.is_ascii_digit());
-    if let Some(..) = split_point {
-        let split_point = split_point.unwrap();
-        let (qty, name) = if line.len() - split_point < line.len() / 2 {
-            // if the quantity is in second half of the line, we can just split at
-            // the number itself
-            let (name, qty) = line.split_at(split_point);
-            (qty, name.trim_matches('x').trim())
-        } else {
-            // if not, then we should split at the first space.
-            line.split_once(' ').unwrap()
-        };
-        let quantity = qty.trim().trim_matches('x').parse().unwrap();   
-        Ok((quantity, String::from(name)))
-    } else {
-        Ok((1, line))
-    }
-}
+/* Need to consider what actions users should be able to take from command line.
+ * Also need to consider how to save user decklists.
+ *      Thinking maybe as a json. That would allow easy parsing, and stuffing info
+ *      like format, last known price, etc
+ */
 
-fn new_decklist(em: EntryMethod, filename: Option<String>) -> Result<HashMap<String, u32>, String> {
-    /* creating a hashmap where the key is the cardname and the quantity is the value */
+fn new_deck(_format: Option<&String>, in_method: Option<&String>, _savefile: String) -> Result<(),String> {
     let mut decklist: HashMap<String, u32> = HashMap::new();
-    if em == EntryMethod::FileName {
-        println!("Read the file, build the decklist");
-        // deal with file existence
-        let x = match filename {
-            Some(filename) => filename,
-            None => return Err(String::from("Please provide a filename.")),
-        };
-        let filepath = Path::new(&x);
-        match filepath.try_exists() {
-            Ok(tf) => match tf {
-                true => (),
-                false => return Err(String::from("File not found")),
-            },
-            Err(_) => return Err(String::from("File permission error (or some other weirdness)")),
-        };
-        let file = File::open(filepath).unwrap();
-        let reader = BufReader::new(file);
-        for line in reader.lines().map(|line| line.unwrap()) {
-            let (qty, name) = parse_card_line(line)?;
-            decklist.insert(name, qty);
+    if in_method.is_none() {
+        let mut buffer = String::new();
+        while stdin().read_line(&mut buffer).expect("Line reading error!") > 0 {
+            continue;
         }
-        Ok(decklist)
-    }
-    else if em == EntryMethod::MassEntry {
-        println!("Read from stdin until blank line, build decklist");
-        Ok(decklist)
+        for line in buffer.lines() {
+            let (qty, name) = deckliste_rs::parse_card_line(String::from(line))?;
+            decklist.entry(name).and_modify(|copies| *copies += 1).or_insert(qty);
+        }
     }
     else {
-        Ok(decklist)
+        decklist = deckliste_rs::parse_deck_file(in_method.unwrap().to_string())?;
+        }
+    for (key, val) in decklist.iter() {
+        println!("{key}: {val}");
+    }
+    // figure out how to write it to file. format, etc.
+    Ok(())
+}
+
+fn check_price(_in_method: String, _input: Option<&String>) -> Result<(), String> {
+    println!("STUB: price is 0.00");
+    Ok(())
+}
+
+fn check_legality(format: String, _in_method: String, _input: Option<&String>) -> Result<(), String> {
+    /* I suppose if we parsee from stdin and a decklist the same way as new_deck
+     * maybe it would make sense to do that in main, then pass in the format and the card list.*/
+    formats = ["casual", "standard", "modern", "commander", "legacy", "vintage"];
+    if format == "all" {
+        for (f in formats) {
+            /* parse list or file if provided. */
+            println!("get legality card by card or something.");
+        }
     }
 }
 
-fn main() -> Result<(), String> {
-    let args: Vec<_> = args().collect();
-    let dl = new_decklist(EntryMethod::FileName, Some(String::from(&args[1])))?;
-    for (key, val) in dl.iter() {
-        println!("{key}: {val}");
-    }
-    Ok(())
+fn main() {
+    let matches = deckliste_rs::cli().get_matches();
+    match matches.subcommand() {
+        Some(("new-deck", sub_matches)) => {
+            let outfile = sub_matches.get_one::<String>("savefile").unwrap().to_string();
+            let format = sub_matches.get_one::<String>("format");
+            let input_method = sub_matches.get_one::<String>("file");
+            new_deck(format, input_method, outfile).unwrap();
+        },
+        Some(("check-price", sub_matches)) => {
+            let input_method: String = sub_matches.ids()
+                                                  .map(|id| id.as_str())
+                                                  .take(1).collect();
+            check_price(String::from(&input_method), 
+                        sub_matches.try_get_one::<String>(&input_method).unwrap_or(None)).unwrap();
+        },
+        Some(("check-legality", sub_matches)) => {
+            let input_method: String = sub_matches.ids()
+                                                  .map(|id| id.as_str())
+                                                  .take(1).collect();
+            let format = sub_matches.get_one::<String>("format").unwrap();
+            check_legality(format, String::from(&input_method),
+                           sub_matches.try_get_one::<String>(&input_method).unwrap_or(None)).unwrap();
+        }
+        _ => unreachable!(),
+    };
 }
