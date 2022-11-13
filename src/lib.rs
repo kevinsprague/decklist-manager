@@ -1,10 +1,74 @@
 use std::{
     collections::HashMap,
+    fs,
     fs::{File},
     io::{BufRead, BufReader,},
     path::Path,
 };
 use clap::{Arg, arg, ArgGroup, Command};
+use serde::Serialize;
+
+#[derive(Serialize, serde::Deserialize, Debug)]
+struct Card {
+    name: String,
+    type_line: String,
+    mana_cost: String,
+    cmc: f64,
+    oracle: String,
+    color_id: Vec<String>,
+    legality: HashMap<String, bool>
+}
+
+pub fn build_lightweight_cards(filename: String) -> Result<(), String> {
+    /* nonzero chance that this should validate the file existence
+     * but this seems excessive for now.
+     */
+    let mut cards: Vec<Card> = Vec::new();
+    let file = File::open(Path::new(&filename)).expect("File open issue!");
+    let reader = BufReader::new(file);
+    let card_json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+    let card_list = card_json.as_array().unwrap();
+    for card in card_list {
+        let mut oracle = String::new();
+        if card["name"].as_str().unwrap().contains("//") {
+            /* FIXME: Need to add this functionality */
+            continue;
+        }
+        oracle += card["oracle_text"].as_str().unwrap();
+        let mut color_id = vec![];
+        for j in card["color_identity"].as_array().unwrap() {
+            color_id.push(j.as_str().unwrap().to_string());
+        }
+        let mut legality_map: HashMap<String, bool> = HashMap::new();
+        for (k,v) in card["legalities"].as_object().unwrap() {
+            let val: bool = v == "legal";
+            legality_map.insert(k.to_string(), val);
+        }
+        let this_card = Card {
+            name: card["name"].as_str().unwrap().to_string(),
+            type_line: card["type_line"].as_str().unwrap().to_string(),
+            mana_cost: card["mana_cost"].as_str().unwrap().to_string(),
+            cmc: card["cmc"].as_f64().unwrap(),
+            oracle,
+            color_id,
+            legality: legality_map
+        };
+        cards.push(this_card);
+    }
+    std::fs::write("cards.json",serde_json::to_string(&cards).unwrap().as_bytes()).unwrap();
+    Ok(())
+}
+pub fn fetch_api() -> Result<(), String> {
+    let body = reqwest::blocking::get("https://api.scryfall.com/bulk-data/oracle-cards").unwrap().text().unwrap();
+    let save = Path::new("cards.gz");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let url = json["download_uri"].as_str().unwrap();
+    let mut card_data = reqwest::blocking::get(url).unwrap();
+    let mut buf: Vec<u8> = vec![];
+    card_data.copy_to(&mut buf).unwrap();
+    fs::write(save, buf).unwrap();
+    Ok(())
+}
 
 pub fn cli() -> Command {
     Command::new("deckliste_rs")
@@ -12,10 +76,15 @@ pub fn cli() -> Command {
     .subcommand_required(true)
     .arg_required_else_help(true)
     .subcommand(
+        Command::new("update-cards")
+        .about("Build new cache of cards from scryfall API")
+    )
+    .subcommand(
         /* new-deck */
         Command::new("new-deck")
-        .about("create a new deck and save it in <SAVEFILE>")
+        .about("create a new deck and save it in <savefile>")
         .arg(arg!(<savefile>))
+        // .arg(arg!(--name <name> "name of the deck. (uses <savefile> as name if omitted.)"))
         .arg(Arg::new("format")
             .required(false)
             .short('f')
@@ -91,16 +160,60 @@ pub fn parse_card_line(line: String) -> Result<(u32, String), String> {
 }
 
 pub fn parse_deck_file(filename: String) -> Result<HashMap<String, u32>, String> {
-    let mut decklist: HashMap<String, u32> = HashMap::new();
     if !validate_file_existence(&filename) {
         return Err(String::from("File access issues. Does {filename} exist?"));
     }
-    let file = File::open(filename).unwrap();
+    let mut decklist: HashMap<String, u32> = HashMap::new();
+    let file = File::open(&filename).unwrap();
     let reader = BufReader::new(file);
-    for line in reader.lines().map(|line| line.unwrap()) {
-        let (qty, name) = parse_card_line(line)?;
-        decklist.entry(name).and_modify(|copies| *copies += 1).or_insert(qty);
+    if filename.strip_suffix(".dk").is_some() {
+        let json: serde_json::Value = serde_json::from_reader(reader).unwrap();
+        let list = json.get("list")
+            .expect("No \"list\" attribute in .dk file, rebuild needed.")
+            .as_object().unwrap();
+        for k in list.keys() {
+            decklist.insert(k.to_string(), list[k].as_u64().unwrap() as u32);
+        }
+    } else {
+        for line in reader.lines().map(|line| line.unwrap()) {
+            let (qty, name) = parse_card_line(line)?;
+            decklist.entry(name).and_modify(|copies| *copies += 1).or_insert(qty);
+        }
     }
     Ok(decklist)
 }
 
+
+pub fn save_deck_file(filename: String, json_string: String) -> Result<(), String> {
+    let filepath = Path::new(&filename);
+    match filepath.try_exists() {
+        Ok(true) => {
+            println!("Warning: File exists! Overwrite? (y/n)");
+            let stdin = std::io::stdin();
+            loop {
+                let mut buf = String::new();
+                match stdin.read_line(&mut buf) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        println!("{e}");
+                        return Err(String::from("read error"));
+                    },
+                };
+                if buf.is_empty() {
+                    continue;
+                }
+                match buf.chars().next().unwrap_or('?').to_ascii_lowercase() {
+                    'y' => break,
+                    'n' => return Err(String::from("File Overwrite Prevented")),
+                    _ => continue,
+                };
+            }
+        },
+        Ok(false) => (),
+        Err(_) => return Err(String::from("Permissions problem")),
+    };
+    match fs::write(filepath, json_string) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(String::from("Write problem")),
+    }
+}
